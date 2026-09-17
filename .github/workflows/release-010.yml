@@ -1,0 +1,146 @@
+name: Build pinned desktop v0.1.10
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+            bundles: dmg,app
+            asset: Zhongguan-Project-AI-Assistant-macOS-Apple-Silicon.dmg
+            updater_asset: Zhongguan-Project-AI-Assistant-macOS-Apple-Silicon.app.tar.gz
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            bundles: dmg,app
+            asset: Zhongguan-Project-AI-Assistant-macOS-Intel.dmg
+            updater_asset: Zhongguan-Project-AI-Assistant-macOS-Intel.app.tar.gz
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Download pinned private source
+        env:
+          SOURCE_REPO_TOKEN_010: ${{ secrets.SOURCE_REPO_TOKEN_010 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/private-build-010"
+          if [ -z "${SOURCE_REPO_TOKEN_010:-}" ]; then
+            echo "::error::Private source credential is missing"
+            exit 1
+          fi
+          if ! curl --fail --silent --show-error --location --retry 2 \
+            --header "Authorization: Bearer ${SOURCE_REPO_TOKEN_010}" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --output "$RUNNER_TEMP/private-build-010/source.tar.gz" \
+            "https://api.github.com/repos/CYY-real/engineering-kb-desktop/tarball/706bb3289237d6af4b7ba49a583ccb69ceffffee" \
+            > "$RUNNER_TEMP/private-build-010/download.log" 2>&1; then
+            echo "::error::Pinned private source download failed"
+            exit 1
+          fi
+          if ! tar -xzf "$RUNNER_TEMP/private-build-010/source.tar.gz" --strip-components=1 -C "$GITHUB_WORKSPACE" \
+            > "$RUNNER_TEMP/private-build-010/extract.log" 2>&1; then
+            echo "::error::Pinned private source extraction failed"
+            exit 1
+          fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Verify pinned release version
+        run: |
+          if ! node scripts/verify-release-version.mjs 0.1.10 > "$RUNNER_TEMP/private-build-010/version.log" 2>&1; then
+            echo "::error::Release version validation failed"
+            exit 1
+          fi
+      - name: Install frontend dependencies
+        run: |
+          if ! npm ci > "$RUNNER_TEMP/private-build-010/npm-install.log" 2>&1; then
+            echo "::error::Frontend dependency installation failed"
+            exit 1
+          fi
+      - name: Test updater resource and installation lifecycle
+        run: |
+          if ! npm run test:updater > "$RUNNER_TEMP/private-build-010/updater-tests.log" 2>&1; then
+            echo "::error::Updater regression tests failed"
+            exit 1
+          fi
+      - name: Build bundled conversion runtime
+        run: |
+          if ! ./scripts/build-sidecar.sh "${{ matrix.target }}" > "$RUNNER_TEMP/private-build-010/sidecar-build.log" 2>&1; then
+            echo "::error::Conversion runtime build failed"
+            exit 1
+          fi
+      - name: Test OCR client and bundled HTTPS runtime
+        run: |
+          if ! python -m unittest discover -s converter -p 'test_*.py' -v > "$RUNNER_TEMP/private-build-010/ocr-tests.log" 2>&1; then
+            echo "::error::OCR regression tests failed"
+            exit 1
+          fi
+          SIDECAR="src-tauri/binaries/engineering-kb-converter-${{ matrix.target }}"
+          if [[ "${{ matrix.target }}" == *windows* ]]; then SIDECAR="${SIDECAR}.exe"; fi
+          if ! "$SIDECAR" --check-runtime > "$RUNNER_TEMP/private-build-010/https-runtime.log" 2>&1; then
+            echo "::error::Bundled HTTPS runtime validation failed"
+            exit 1
+          fi
+      - name: Build signed updater and installer
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_010 }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: |
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::error::Updater signing credential is missing"
+            exit 1
+          fi
+          if ! npm run tauri build -- --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}" \
+            > "$RUNNER_TEMP/private-build-010/installer-build.log" 2>&1; then
+            echo "::error::Installer build failed"
+            exit 1
+          fi
+      - name: Audit macOS application bundle for project data
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          APP_PATH="$(find src-tauri/target -path '*/release/bundle/macos/中冠项管AI助手.app' -print -quit 2> "$RUNNER_TEMP/private-build-010/find-bundle.log")"
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::Application bundle was not found for audit"
+            exit 1
+          fi
+          if ! python scripts/audit-bundle-content.py "$APP_PATH" > "$RUNNER_TEMP/private-build-010/bundle-audit.log" 2>&1; then
+            echo "::error::Application bundle content audit failed"
+            exit 1
+          fi
+      - name: Collect signed release assets
+        run: |
+          if ! python scripts/collect-release-asset.py "${{ matrix.asset }}" "${{ matrix.updater_asset }}" \
+            > "$RUNNER_TEMP/private-build-010/collect-assets.log" 2>&1; then
+            echo "::error::Signed release asset collection failed"
+            exit 1
+          fi
+      - name: Write source provenance
+        run: |
+          if ! python -c 'import json; from pathlib import Path; Path("release-assets/provenance.json").write_text(json.dumps({"source_sha":"706bb3289237d6af4b7ba49a583ccb69ceffffee","version":"0.1.10","target":"${{ matrix.target }}"}, indent=2)+"\n", encoding="utf-8")' \
+            > "$RUNNER_TEMP/private-build-010/provenance.log" 2>&1; then
+            echo "::error::Release provenance generation failed"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-0.1.10-${{ matrix.target }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 3
