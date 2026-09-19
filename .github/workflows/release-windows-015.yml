@@ -72,7 +72,7 @@ jobs:
           fi
       - name: Test updater resource and installation lifecycle
         run: |
-          if ! node --test tests/*.test.mjs > "$RUNNER_TEMP/private-build-015/updater-tests.log" 2>&1; then
+          if ! npm run test:updater > "$RUNNER_TEMP/private-build-015/updater-tests.log" 2>&1; then
             echo "::error::Updater regression tests failed"
             exit 1
           fi
