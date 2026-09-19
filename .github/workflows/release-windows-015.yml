@@ -144,7 +144,7 @@ jobs:
           fi
       - name: Write source provenance
         run: |
-          if ! python -c 'import json; from pathlib import Path; Path("release-assets/provenance.json").write_text(json.dumps({"source_sha":"b714a68bebf97266ff0a6ceb1142a9ac6f326115","version":"0.1.15","target":"${{ matrix.target }}"}, indent=2)+"\n", encoding="utf-8")' \
+          if ! python -c 'import json; from pathlib import Path; Path("release-assets/provenance.json").write_text(json.dumps({"source_sha":"d8ab99479c859fd38cecb71c7bdc33ae54dc505e","version":"0.1.15","target":"${{ matrix.target }}"}, indent=2)+"\n", encoding="utf-8")' \
             > "$RUNNER_TEMP/private-build-015/provenance.log" 2>&1; then
             echo "::error::Release provenance generation failed"
             exit 1
