@@ -121,6 +121,7 @@ jobs:
           fi
           if ! npm run tauri build -- --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}" \
             > "$RUNNER_TEMP/private-build-015/installer-build.log" 2>&1; then
+            tail -n 200 "$RUNNER_TEMP/private-build-015/installer-build.log"
             echo "::error::Installer build failed"
             exit 1
           fi
