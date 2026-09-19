@@ -1,0 +1,158 @@
+name: Build pinned Windows desktop v0.1.15
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+            asset: Zhongguan-Project-AI-Assistant-Windows-x64.exe
+            updater_asset: Zhongguan-Project-AI-Assistant-Windows-x64.exe
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Download pinned private source
+        env:
+          SOURCE_REPO_TOKEN_015: ${{ secrets.SOURCE_REPO_TOKEN_015 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/private-build-015"
+          if [ -z "${SOURCE_REPO_TOKEN_015:-}" ]; then
+            echo "::error::Private source credential is missing"
+            exit 1
+          fi
+          if ! curl --fail --silent --show-error --location --retry 2 \
+            --header "Authorization: Bearer ${SOURCE_REPO_TOKEN_015}" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --output "$RUNNER_TEMP/private-build-015/source.tar.gz" \
+            "https://api.github.com/repos/CYY-real/engineering-kb-desktop/tarball/baa9bf88ef8efe3146b8075ceb78de8eb88dee88" \
+            > "$RUNNER_TEMP/private-build-015/download.log" 2>&1; then
+            echo "::error::Pinned private source download failed"
+            exit 1
+          fi
+          SOURCE_ARCHIVE="$(cygpath -u "$RUNNER_TEMP/private-build-015/source.tar.gz")"
+          if ! tar -xzf "$SOURCE_ARCHIVE" --strip-components=1 -C . \
+            > "$RUNNER_TEMP/private-build-015/extract.log" 2>&1; then
+            echo "::error::Pinned private source extraction failed"
+            exit 1
+          fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Verify pinned release version
+        run: |
+          if ! node scripts/verify-release-version.mjs 0.1.15 > "$RUNNER_TEMP/private-build-015/version.log" 2>&1; then
+            echo "::error::Release version validation failed"
+            exit 1
+          fi
+      - name: Install frontend dependencies
+        run: |
+          if ! npm ci > "$RUNNER_TEMP/private-build-015/npm-install.log" 2>&1; then
+            echo "::error::Frontend dependency installation failed"
+            exit 1
+          fi
+      - name: Test updater resource and installation lifecycle
+        run: |
+          if ! node --test tests/*.test.mjs > "$RUNNER_TEMP/private-build-015/updater-tests.log" 2>&1; then
+            echo "::error::Updater regression tests failed"
+            exit 1
+          fi
+      - name: Build bundled conversion runtime
+        run: |
+          if ! ./scripts/build-sidecar.sh "${{ matrix.target }}" > "$RUNNER_TEMP/private-build-015/sidecar-build.log" 2>&1; then
+            echo "::error::Conversion runtime build failed"
+            exit 1
+          fi
+      - name: Test OCR client and bundled HTTPS runtime
+        run: |
+          if ! python -m unittest discover -s converter -p 'test_*.py' -v > "$RUNNER_TEMP/private-build-015/ocr-tests.log" 2>&1; then
+            echo "::error::OCR regression tests failed"
+            exit 1
+          fi
+          SIDECAR="src-tauri/binaries/engineering-kb-converter-${{ matrix.target }}"
+          if [[ "${{ matrix.target }}" == *windows* ]]; then SIDECAR="${SIDECAR}.exe"; fi
+          if ! "$SIDECAR" --check-conversion-runtime > "$RUNNER_TEMP/private-build-015/conversion-runtime.log" 2>&1; then
+            echo "::error::Bundled model and DOCX conversion validation failed"
+            exit 1
+          fi
+          if ! "$SIDECAR" --check-runtime > "$RUNNER_TEMP/private-build-015/https-runtime.log" 2>&1; then
+            echo "::error::Bundled HTTPS runtime validation failed"
+            exit 1
+          fi
+      - name: Build frontend for native test context
+        run: |
+          if ! npm run build > "$RUNNER_TEMP/private-build-015/frontend-build.log" 2>&1; then
+            echo "::error::Frontend production build failed"
+            exit 1
+          fi
+      - name: Test task lifecycle and archived file paths on native platform
+        run: |
+          if ! cargo test --manifest-path src-tauri/Cargo.toml --lib > "$RUNNER_TEMP/private-build-015/rust-tests.log" 2>&1; then
+            echo "::error::Native task lifecycle regression tests failed"
+            exit 1
+          fi
+      - name: Build signed updater and installer
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_015 }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: |
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::error::Updater signing credential is missing"
+            exit 1
+          fi
+          if ! npm run tauri build -- --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}" \
+            > "$RUNNER_TEMP/private-build-015/installer-build.log" 2>&1; then
+            echo "::error::Installer build failed"
+            exit 1
+          fi
+      - name: Audit macOS application bundle for project data
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          APP_PATH="$(find src-tauri/target -path '*/release/bundle/macos/中冠项管AI助手.app' -print -quit 2> "$RUNNER_TEMP/private-build-015/find-bundle.log")"
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::Application bundle was not found for audit"
+            exit 1
+          fi
+          if ! python scripts/audit-bundle-content.py "$APP_PATH" > "$RUNNER_TEMP/private-build-015/bundle-audit.log" 2>&1; then
+            echo "::error::Application bundle content audit failed"
+            exit 1
+          fi
+      - name: Collect signed release assets
+        run: |
+          if ! python scripts/collect-release-asset.py "${{ matrix.asset }}" "${{ matrix.updater_asset }}" \
+            > "$RUNNER_TEMP/private-build-015/collect-assets.log" 2>&1; then
+            echo "::error::Signed release asset collection failed"
+            exit 1
+          fi
+      - name: Write source provenance
+        run: |
+          if ! python -c 'import json; from pathlib import Path; Path("release-assets/provenance.json").write_text(json.dumps({"source_sha":"baa9bf88ef8efe3146b8075ceb78de8eb88dee88","version":"0.1.15","target":"${{ matrix.target }}"}, indent=2)+"\n", encoding="utf-8")' \
+            > "$RUNNER_TEMP/private-build-015/provenance.log" 2>&1; then
+            echo "::error::Release provenance generation failed"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-0.1.15-${{ matrix.target }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 3
