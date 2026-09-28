@@ -56,7 +56,7 @@ jobs:
           if ! python -c 'import os,base64,gzip; from pathlib import Path; Path(".private-release.patch").write_bytes(gzip.decompress(base64.b64decode(os.environ["SOURCE_OVERLAY_022"])))' > "$RUNNER_TEMP/private-build-022/overlay.log" 2>&1; then
             echo "::error::Release snapshot decoding failed"; exit 1
           fi
-          if ! git apply --check .private-release.patch >> "$RUNNER_TEMP/private-build-022/overlay.log" 2>&1 || ! git apply .private-release.patch >> "$RUNNER_TEMP/private-build-022/overlay.log" 2>&1; then
+          if ! git -c core.autocrlf=false -c core.safecrlf=false apply --check .private-release.patch >> "$RUNNER_TEMP/private-build-022/overlay.log" 2>&1 || ! git -c core.autocrlf=false -c core.safecrlf=false apply .private-release.patch >> "$RUNNER_TEMP/private-build-022/overlay.log" 2>&1; then
             echo "::error::Release snapshot application failed"; exit 1
           fi
           rm .private-release.patch
